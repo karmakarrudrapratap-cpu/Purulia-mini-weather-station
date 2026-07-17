@@ -1,0 +1,1400 @@
+/*
+ * ESP32 UART Receiver with OLED + Web Server
+ * Receives data from ESP8266 via UART
+ * Displays on OLED and serves via web page
+ * 
+ * Connections:
+ * ESP32 → OLED
+ * GPIO21 (SDA) → OLED SDA
+ * GPIO22 (SCL) → OLED SCL
+ * 3.3V → OLED VCC
+ * GND → OLED GND
+ * 
+ * ESP32 → ESP8266
+ * GPIO16 (RX2) → ESP8266 TX (GPIO1)
+ * GND → GND
+ */
+
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <HTTPClient.h>
+
+// ===================== WIFI STA CONFIGURATION =====================
+const char* ssid = "Biswajit";
+const char* password = "123@Ramsita";
+
+// ===================== FIREBASE REALTIME DATABASE =====================
+const char* firebase_url = "https://purulia-weather-station-default-rtdb.asia-southeast1.firebasedatabase.app/weather.json?auth=Om3UgPnFWLye4g6tIkNtoIFELbgzCPzhZ28FD5O8";
+
+// ===================== OLED DISPLAY =====================
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define OLED_SDA 21
+#define OLED_SCL 22
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// ===================== WEB SERVER =====================
+WebServer server(80);
+
+// ===================== VARIABLES =====================
+String receivedData = "";
+float temperature = 0;
+float humidity = 0;
+float pressure = 0;
+bool dataReceived = false;
+unsigned long lastDataTime = 0;
+unsigned long lastDebugPrint = 0;
+unsigned long lastLogTime = 0;
+
+float temp_min = 999.0;
+float temp_max = -999.0;
+float humi_min = 999.0;
+float humi_max = -999.0;
+String temp_min_time = "--:--";
+String temp_max_time = "--:--";
+int current_day = -1;
+
+// ===================== OLED UPDATE FUNCTION =====================
+// ===================== OLED UPDATE FUNCTION =====================
+void updateOLED() {
+  display.clearDisplay();
+  
+  // 1. Draw Outer Frame
+  display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
+  
+  // 2. Draw Header Divider
+  display.drawLine(1, 11, 126, 11, SSD1306_WHITE);
+  
+  // 3. Draw Header Title
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(4, 3);
+  display.print("TELEMETRY HUB");
+  
+  // 4. Draw Blinking Status Block
+  bool blinkState = (millis() / 500) % 2;
+  
+  if (dataReceived) {
+    // Online - show blinking "RUN" box
+    if (blinkState) {
+      display.fillRect(98, 2, 24, 8, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
+    } else {
+      display.drawRect(98, 2, 24, 8, SSD1306_WHITE);
+      display.setTextColor(SSD1306_WHITE);
+    }
+    display.setCursor(102, 2);
+    display.print("RUN");
+    display.setTextColor(SSD1306_WHITE);
+    
+    // --- Draw Row 1: Temperature ---
+    // Custom Thermometer Icon
+    display.drawRoundRect(6, 14, 4, 10, 2, SSD1306_WHITE);
+    display.fillCircle(7, 23, 3, SSD1306_WHITE);
+    display.drawPixel(7, 23, SSD1306_BLACK); // Bulb center
+    
+    display.setCursor(18, 18);
+    display.print("TEMP");
+    
+    display.setTextSize(2);
+    display.setCursor(54, 14);
+    display.print(temperature, 1);
+    
+    display.drawCircle(112, 14, 2, SSD1306_WHITE); // Degree symbol
+    display.setTextSize(1);
+    display.setCursor(117, 14);
+    display.print("C");
+    
+    // --- Draw Row 2: Humidity ---
+    // Custom Water Droplet Icon
+    display.fillTriangle(8, 30, 4, 37, 12, 37, SSD1306_WHITE);
+    display.fillCircle(8, 37, 4, SSD1306_WHITE);
+    
+    display.setCursor(18, 34);
+    display.print("HUMI");
+    
+    display.setTextSize(2);
+    display.setCursor(54, 30);
+    display.print(humidity, 1);
+    
+    display.setTextSize(1);
+    display.setCursor(112, 30);
+    display.print("%");
+    
+    // --- Draw Row 3: Pressure ---
+    // Custom Pressure Gauge Icon
+    display.drawCircle(8, 52, 5, SSD1306_WHITE);
+    display.drawLine(8, 52, 11, 49, SSD1306_WHITE); // Needle
+    
+    display.setCursor(18, 51);
+    display.print("PRES");
+    
+    display.setTextSize(2);
+    display.setCursor(54, 47);
+    display.print(pressure, 0);
+    
+    display.setTextSize(1);
+    display.setCursor(105, 47);
+    display.print("hPa");
+    
+  } else {
+    // Offline - show blinking "ERR" box
+    if (blinkState) {
+      display.fillRect(98, 2, 24, 8, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
+    } else {
+      display.drawRect(98, 2, 24, 8, SSD1306_WHITE);
+      display.setTextColor(SSD1306_WHITE);
+    }
+    display.setCursor(102, 2);
+    display.print("ERR");
+    display.setTextColor(SSD1306_WHITE);
+    
+    // Draw Warning Alert Triangle Sign
+    display.drawTriangle(24, 23, 8, 51, 40, 51, SSD1306_WHITE);
+    display.drawLine(24, 30, 24, 41, SSD1306_WHITE);
+    display.drawPixel(24, 45, SSD1306_WHITE);
+    
+    display.setTextSize(1);
+    display.setCursor(48, 26);
+    display.print("LINK TIMEOUT");
+    display.setCursor(48, 40);
+    display.print("CHECK NODE");
+  }
+  
+  display.display();
+}
+
+// ===================== TIME & DAILY TRACKING HELPERS =====================
+String getFormattedTime() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    return "--:--";
+  }
+  char timeStr[12];
+  strftime(timeStr, sizeof(timeStr), "%I:%M %p", &timeinfo); // e.g. "02:15 PM"
+  return String(timeStr);
+}
+
+void checkDailyReset() {
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    if (timeinfo.tm_yday != current_day) {
+      current_day = timeinfo.tm_yday;
+      temp_min = temperature;
+      temp_max = temperature;
+      humi_min = humidity;
+      humi_max = humidity;
+      temp_min_time = getFormattedTime();
+      temp_max_time = getFormattedTime();
+      Serial.println("🔄 Daily high/low variables reset for the new day.");
+    }
+  }
+}
+
+// ===================== HISTORICAL LOG UPLOAD =====================
+void uploadHistoryToFirebase() {
+  if (WiFi.status() == WL_CONNECTED && dataReceived) {
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo)) {
+      char yearStr[5];
+      char dateStr[6]; // e.g. "17-07"
+      char timeStr[6]; // e.g. "09-32"
+      strftime(yearStr, sizeof(yearStr), "%Y", &timeinfo);
+      strftime(dateStr, sizeof(dateStr), "%d-%m", &timeinfo);
+      strftime(timeStr, sizeof(timeStr), "%H-%M", &timeinfo);
+      
+      String pathUrl = "https://purulia-weather-station-default-rtdb.asia-southeast1.firebasedatabase.app/history/";
+      pathUrl += String(yearStr) + "/" + String(dateStr) + "/" + String(timeStr) + ".json?auth=Om3UgPnFWLye4g6tIkNtoIFELbgzCPzhZ28FD5O8";
+      
+      HTTPClient http;
+      http.begin(pathUrl);
+      http.addHeader("Content-Type", "application/json");
+      
+      String jsonPayload = "{";
+      jsonPayload += "\"temp\":" + String(temperature) + ",";
+      jsonPayload += "\"humi\":" + String(humidity) + ",";
+      jsonPayload += "\"pres\":" + String(pressure);
+      jsonPayload += "}";
+      
+      int httpResponseCode = http.PUT(jsonPayload);
+      if (httpResponseCode > 0) {
+        Serial.printf("✅ Historical log saved: %d\n", httpResponseCode);
+      } else {
+        Serial.printf("❌ Historical log upload failed: %s\n", http.errorToString(httpResponseCode).c_str());
+      }
+      http.end();
+    }
+  }
+}
+
+// ===================== FIREBASE UPLOAD =====================
+void uploadToFirebase() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(firebase_url);
+    http.addHeader("Content-Type", "application/json");
+    
+    time_t now;
+    time(&now);
+    
+    String jsonPayload = "{";
+    jsonPayload += "\"temperature\":" + String(temperature) + ",";
+    jsonPayload += "\"humidity\":" + String(humidity) + ",";
+    jsonPayload += "\"pressure\":" + String(pressure) + ",";
+    jsonPayload += "\"timestamp\":" + String(millis()) + ",";
+    jsonPayload += "\"epoch_time\":" + String(now) + ",";
+    jsonPayload += "\"temp_min\":" + String(temp_min) + ",";
+    jsonPayload += "\"temp_min_time\":\"" + temp_min_time + "\",";
+    jsonPayload += "\"temp_max\":" + String(temp_max) + ",";
+    jsonPayload += "\"temp_max_time\":\"" + temp_max_time + "\",";
+    jsonPayload += "\"humi_min\":" + String(humi_min) + ",";
+    jsonPayload += "\"humi_max\":" + String(humi_max) + ",";
+    jsonPayload += "\"online\":true";
+    jsonPayload += "}";
+    
+    int httpResponseCode = http.PUT(jsonPayload);
+    
+    if (httpResponseCode > 0) {
+      Serial.printf("✅ Firebase Upload Success: %d\n", httpResponseCode);
+    } else {
+      Serial.printf("❌ Firebase Upload Failed, error: %s\n", http.errorToString(httpResponseCode).c_str());
+    }
+    http.end();
+  } else {
+    Serial.println("❌ WiFi Disconnected, cannot upload to Firebase");
+  }
+}
+
+// ===================== PARSE DATA =====================
+void parseData(String data) {
+  data.trim();
+  
+  Serial.print("📥 Parsing: ");
+  Serial.println(data);
+  
+  int firstPipe = data.indexOf('|');
+  int secondPipe = data.indexOf('|', firstPipe + 1);
+  int thirdPipe = data.indexOf('|', secondPipe + 1);
+  int endMarker = data.indexOf('#');
+  
+  if (firstPipe != -1 && secondPipe != -1 && thirdPipe != -1) {
+    String type = data.substring(0, firstPipe);
+    
+    if (type == "SENSOR") {
+      temperature = data.substring(firstPipe + 1, secondPipe).toFloat();
+      humidity = data.substring(secondPipe + 1, thirdPipe).toFloat();
+      
+      if (endMarker != -1) {
+        pressure = data.substring(thirdPipe + 1, endMarker).toFloat();
+      } else {
+        pressure = data.substring(thirdPipe + 1).toFloat();
+      }
+      
+      checkDailyReset();
+      
+      if (temperature < temp_min) {
+        temp_min = temperature;
+        temp_min_time = getFormattedTime();
+      }
+      if (temperature > temp_max) {
+        temp_max = temperature;
+        temp_max_time = getFormattedTime();
+      }
+      
+      if (humidity < humi_min) {
+        humi_min = humidity;
+      }
+      if (humidity > humi_max) {
+        humi_max = humidity;
+      }
+      
+      dataReceived = true;
+      lastDataTime = millis();
+      
+      Serial.println("✅ Data parsed:");
+      Serial.printf("   Temp: %.2f°C\n", temperature);
+      Serial.printf("   Hum: %.2f%%\n", humidity);
+      Serial.printf("   Press: %.2fhPa\n", pressure);
+      
+      updateOLED();
+      uploadToFirebase();
+    }
+  } else {
+    Serial.println("❌ Failed to parse: " + data);
+  }
+}
+
+
+
+// ===================== WEB PAGE =====================
+void handleRoot() {
+  static const char html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PURULIA MINI WEATHER STATION // Live Telemetry</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
+    
+    :root {
+      --bg-dark: #030408;
+      --bg-glass: rgba(10, 15, 30, 0.6);
+      --bg-glass-hover: rgba(16, 24, 48, 0.8);
+      --border-color: rgba(56, 189, 248, 0.12);
+      --border-hover: rgba(56, 189, 248, 0.35);
+      
+      --text-primary: #f8fafc;
+      --text-secondary: #94a3b8;
+      --text-muted: #475569;
+      
+      --accent-temp: #ff5c5c;
+      --accent-temp-rgb: 255, 92, 92;
+      --accent-humi: #06b6d4;
+      --accent-humi-rgb: 6, 182, 212;
+      --accent-pres: #10b981;
+      --accent-pres-rgb: 16, 185, 129;
+      --accent-blue: #38bdf8;
+      
+      --font-display: 'Outfit', sans-serif;
+      --font-body: 'Inter', sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+    
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: var(--font-body);
+      background-color: var(--bg-dark);
+      background-image: 
+        radial-gradient(at 10% 20%, rgba(56, 189, 248, 0.04) 0px, transparent 40%),
+        radial-gradient(at 90% 80%, rgba(16, 185, 129, 0.03) 0px, transparent 40%),
+        radial-gradient(at 50% 50%, rgba(239, 68, 68, 0.02) 0px, transparent 50%);
+      background-attachment: fixed;
+      color: var(--text-primary);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      padding: 40px 20px;
+    }
+    
+    .container {
+      max-width: 1200px;
+      width: 100%;
+      margin: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 30px;
+    }
+    
+    /* Header Styles */
+    header {
+      background: var(--bg-glass);
+      border: 1px solid var(--border-color);
+      border-radius: 20px;
+      padding: 20px 30px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      backdrop-filter: blur(16px) saturate(180%);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    }
+    
+    @media (max-width: 768px) {
+      header {
+        flex-direction: column;
+        gap: 16px;
+        padding: 20px;
+      }
+    }
+    
+    /* Online/Offline Status Badge */
+    .status-area {
+      display: flex;
+      align-items: center;
+    }
+    
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 700;
+      padding: 8px 16px;
+      border-radius: 8px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      transition: all 0.3s ease;
+    }
+    
+    .status-badge.online {
+      background: rgba(16, 185, 129, 0.08);
+      color: var(--accent-pres);
+      border: 1px solid rgba(16, 185, 129, 0.25);
+      box-shadow: 0 0 15px rgba(16, 185, 129, 0.15);
+    }
+    
+    .status-badge.offline {
+      background: rgba(239, 68, 68, 0.08);
+      color: var(--accent-temp);
+      border: 1px solid rgba(239, 68, 68, 0.25);
+      box-shadow: 0 0 15px rgba(239, 68, 68, 0.15);
+    }
+    
+    .pulse-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background-color: currentColor;
+    }
+    
+    .status-badge.online .pulse-dot {
+      animation: pulse 1.5s infinite;
+    }
+    
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+      70% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+    }
+    
+    /* Logo Area */
+    .logo-area {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    
+    .logo-area h1 {
+      font-family: var(--font-display);
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      background: linear-gradient(135deg, #38bdf8, #06b6d4);
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    
+    /* Animated Digital Clock */
+    .clock-area {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      justify-content: center;
+      font-family: var(--font-mono);
+    }
+    
+    @media (max-width: 768px) {
+      .clock-area {
+        align-items: center;
+      }
+    }
+    
+    #clock-time {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--accent-blue);
+      text-shadow: 0 0 10px rgba(56, 189, 248, 0.3);
+      letter-spacing: 1px;
+    }
+    
+    #clock-date {
+      font-size: 10px;
+      color: var(--text-secondary);
+      font-weight: 500;
+      letter-spacing: 2px;
+      margin-top: 4px;
+      text-transform: uppercase;
+    }
+    
+    /* Metrics Grid */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+    }
+    
+    @media (max-width: 868px) {
+      .metrics-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    
+    /* Cards */
+    .card {
+      background: var(--bg-glass);
+      border: 1px solid var(--border-color);
+      border-radius: 20px;
+      padding: 28px;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      overflow: hidden;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+      transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 4px;
+    }
+    
+    .card:hover {
+      transform: translateY(-6px);
+      border-color: var(--border-hover);
+      background: var(--bg-glass-hover);
+    }
+    
+    .card.temp::before { background: var(--accent-temp); }
+    .card.humi::before { background: var(--accent-humi); }
+    .card.pres::before { background: var(--accent-pres); }
+    
+    .card.temp:hover { box-shadow: 0 16px 40px rgba(var(--accent-temp-rgb), 0.15); }
+    .card.humi:hover { box-shadow: 0 16px 40px rgba(var(--accent-humi-rgb), 0.15); }
+    .card.pres:hover { box-shadow: 0 16px 40px rgba(var(--accent-pres-rgb), 0.15); }
+    
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+    
+    .card-title {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+    }
+    
+    .card-icon {
+      width: 40px;
+      height: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      transition: all 0.3s ease;
+    }
+    
+    .card:hover .card-icon {
+      transform: scale(1.1);
+      background: rgba(255, 255, 255, 0.05);
+    }
+    
+    .card-icon svg {
+      width: 22px;
+      height: 22px;
+    }
+    
+    .temp .card-icon svg { stroke: var(--accent-temp); }
+    .humi .card-icon svg { stroke: var(--accent-humi); }
+    .pres .card-icon svg { stroke: var(--accent-pres); }
+    
+    .card-value {
+      font-family: var(--font-display);
+      font-size: 54px;
+      font-weight: 800;
+      color: var(--text-primary);
+      margin-bottom: 16px;
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      letter-spacing: -1px;
+    }
+    
+    .card-unit {
+      font-size: 22px;
+      color: var(--text-secondary);
+      font-weight: 500;
+    }
+    
+    .meter-bg {
+      height: 6px;
+      background: rgba(255, 255, 255, 0.04);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-bottom: 10px;
+    }
+    
+    .meter-bar {
+      height: 100%;
+      width: 0%;
+      border-radius: 3px;
+      transition: width 1.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    
+    .temp .meter-bar { background: linear-gradient(90deg, #fd8a8a, var(--accent-temp)); }
+    .humi .meter-bar { background: linear-gradient(90deg, #67e8f9, var(--accent-humi)); }
+    .pres .meter-bar { background: linear-gradient(90deg, #34d399, var(--accent-pres)); }
+    
+    .meter-labels {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-secondary);
+    }
+    
+    .card-subtext {
+      margin-top: 18px;
+      padding-top: 12px;
+      border-top: 1px solid rgba(255, 255, 255, 0.04);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-secondary);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    
+    .subtext-row {
+      display: flex;
+      justify-content: space-between;
+      width: 100%;
+    }
+    
+    .minmax-row {
+      display: flex;
+      justify-content: space-between;
+      width: 100%;
+      border-top: 1px dashed rgba(255, 255, 255, 0.05);
+      padding-top: 8px;
+      font-size: 10px;
+    }
+    
+    .trend-indicator {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-weight: 700;
+    }
+    
+    .trend-up { color: var(--accent-temp); }
+    .trend-down { color: var(--accent-blue); }
+    .trend-stable { color: var(--accent-pres); }
+    
+    /* Graph Section Panel */
+    .panel {
+      background: var(--bg-glass);
+      border: 1px solid var(--border-color);
+      border-radius: 20px;
+      padding: 28px;
+      backdrop-filter: blur(16px) saturate(180%);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+      transition: border-color 0.3s ease;
+      width: 100%;
+    }
+    
+    .panel:hover {
+      border-color: var(--border-hover);
+    }
+    
+    .panel-header {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-secondary);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      padding-bottom: 12px;
+      margin-bottom: 18px;
+      letter-spacing: 1px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    
+    .chart-container {
+      position: relative;
+      height: 320px;
+      width: 100%;
+    }
+    
+    footer {
+      text-align: center;
+      margin-top: 20px;
+      padding: 30px 0 10px;
+      border-top: 1px solid rgba(255, 255, 255, 0.04);
+    }
+    
+    .footer-content {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 14px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    
+    @media (max-width: 600px) {
+      .footer-content {
+        flex-direction: column;
+        gap: 8px;
+      }
+      .separator {
+        display: none;
+      }
+    }
+    
+    .developer-credit {
+      color: var(--text-secondary);
+      font-weight: 500;
+    }
+    
+    .dev-name {
+      color: var(--accent-blue);
+      font-weight: 700;
+      position: relative;
+      display: inline-block;
+    }
+    
+    .dev-name::after {
+      content: '';
+      position: absolute;
+      bottom: -2px;
+      left: 0;
+      width: 100%;
+      height: 1px;
+      background: var(--accent-blue);
+      box-shadow: 0 0 8px var(--accent-blue);
+    }
+    
+    /* Connection Lost Screen Blur */
+    #offline-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(2, 3, 6, 0.9);
+      backdrop-filter: blur(12px);
+      z-index: 1000;
+      display: none;
+      justify-content: center;
+      align-items: center;
+      flex-direction: column;
+      gap: 20px;
+    }
+    
+    .alarm-box {
+      border: 1px solid rgba(239, 68, 68, 0.35);
+      background: rgba(239, 68, 68, 0.03);
+      border-radius: 20px;
+      padding: 40px;
+      text-align: center;
+      max-width: 450px;
+      box-shadow: 0 0 40px rgba(239, 68, 68, 0.15);
+      animation: alert-pulse 2s infinite alternate;
+    }
+    
+    @keyframes alert-pulse {
+      0% { box-shadow: 0 0 20px rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.25); }
+      100% { box-shadow: 0 0 40px rgba(239, 68, 68, 0.3); border-color: rgba(239, 68, 68, 0.6); }
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <div id="offline-overlay">
+    <div class="alarm-box">
+      <h2 style="color: var(--accent-temp); font-family: var(--font-display); font-size: 28px; margin-bottom: 12px; font-weight: 800;">⚠️ CONNECTION OFFLINE</h2>
+      <p style="font-size: 15px; margin-bottom: 24px; color: var(--text-secondary); line-height: 1.5;">Lost connection to the Purulia Weather Station database. Reconnecting...</p>
+      <div style="font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px;">Retrying datalink...</div>
+    </div>
+  </div>
+
+  <div class="container">
+    <header>
+      <div class="status-area">
+        <div id="status-badge" class="status-badge offline">
+          <span class="pulse-dot"></span>STATION OFFLINE
+        </div>
+      </div>
+      <div class="logo-area">
+        <h1>PURULIA MINI WEATHER STATION</h1>
+      </div>
+      <div class="clock-area">
+        <span id="clock-time">--:--:-- --</span>
+        <span id="clock-date">LOADING TIME...</span>
+      </div>
+    </header>
+
+    <!-- METRICS GRID -->
+    <div class="metrics-grid">
+      <!-- TEMP CARD -->
+      <div class="card temp">
+        <div class="card-header">
+          <span class="card-title">Temperature</span>
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></svg>
+          </div>
+        </div>
+        <div class="card-value">
+          <span id="temp-val">--</span>
+          <span class="card-unit">°C</span>
+        </div>
+        <div class="meter-bg">
+          <div id="temp-bar" class="meter-bar"></div>
+        </div>
+        <div class="meter-labels">
+          <span>0°C</span>
+          <span>LIMIT: 50°C</span>
+        </div>
+        <div class="card-subtext">
+          <div class="subtext-row">
+            <span>Dew Point: <span id="temp-sub-val">--</span> °C</span>
+            <span class="trend-indicator trend-stable" id="temp-trend">STABLE</span>
+          </div>
+          <div class="minmax-row">
+            <span>MIN: <span id="temp-min-val" style="color: var(--accent-blue); font-weight:700;">--</span> <span style="font-size: 8px; color: var(--text-muted);" id="temp-min-time"></span></span>
+            <span>MAX: <span id="temp-max-val" style="color: var(--accent-temp); font-weight:700;">--</span> <span style="font-size: 8px; color: var(--text-muted);" id="temp-max-time"></span></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- HUMI CARD -->
+      <div class="card humi">
+        <div class="card-header">
+          <span class="card-title">Humidity</span>
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></svg>
+          </div>
+        </div>
+        <div class="card-value">
+          <span id="hum-val">--</span>
+          <span class="card-unit">%</span>
+        </div>
+        <div class="meter-bg">
+          <div id="hum-bar" class="meter-bar"></div>
+        </div>
+        <div class="meter-labels">
+          <span>0%</span>
+          <span>LIMIT: 100%</span>
+        </div>
+        <div class="card-subtext">
+          <div class="subtext-row">
+            <span>Absolute Humi: <span id="hum-sub-val">--</span> g/m³</span>
+            <span class="trend-indicator trend-stable" id="hum-trend">STABLE</span>
+          </div>
+          <div class="minmax-row">
+            <span>MIN: <span id="humi-min-val" style="color: var(--accent-blue); font-weight:700;">--</span> %</span>
+            <span>MAX: <span id="humi-max-val" style="color: var(--accent-temp); font-weight:700;">--</span> %</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- PRES CARD -->
+      <div class="card pres">
+        <div class="card-header">
+          <span class="card-title">Pressure</span>
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l3 3"/></svg>
+          </div>
+        </div>
+        <div class="card-value">
+          <span id="pres-val">--</span>
+          <span class="card-unit">hPa</span>
+        </div>
+        <div class="meter-bg">
+          <div id="pres-bar" class="meter-bar"></div>
+        </div>
+        <div class="meter-labels">
+          <span>950 hPa</span>
+          <span>LIMIT: 1050 hPa</span>
+        </div>
+        <div class="card-subtext">
+          <div class="subtext-row">
+            <span>Sea-Level Calibrated: <span id="pres-sub-val">--</span> hPa</span>
+            <span class="trend-indicator trend-stable" id="pres-trend">STABLE</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- LIVE HISTORY GRAPH PANEL -->
+    <div class="panel">
+      <div class="panel-header">
+        <span>METEOROLOGICAL HISTORY GRAPH (24 HOUR HISTORY)</span>
+        <span style="font-size: 10px; color: var(--accent-blue); font-weight: 700; letter-spacing: 1px;">REAL-TIME TELEMETRY</span>
+      </div>
+      <div class="chart-container">
+        <canvas id="historyChart"></canvas>
+      </div>
+    </div>
+
+    <footer>
+      <div class="footer-content">
+        <span>PURULIA WEATHER STATION &copy; 2026</span>
+        <span class="separator">|</span>
+        <span class="developer-credit">DEVLOPED BY <span class="dev-name">RUDRAPRATAP</span></span>
+      </div>
+    </footer>
+  </div>
+
+  <script>
+    let history = { temp: [], humi: [], pres: [] };
+    let lastDataTime = 0;
+    
+    // Live Chart Configuration
+    const ctx = document.getElementById('historyChart').getContext('2d');
+    
+    let chartHistory = { labels: [], temp: [], humi: [] };
+    try {
+      const stored = localStorage.getItem('weather_chart_history_v2');
+      if (stored) {
+        chartHistory = JSON.parse(stored);
+      }
+    } catch(e) {}
+    
+    const weatherChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: chartHistory.labels,
+        datasets: [
+          {
+            label: 'Temperature (°C)',
+            data: chartHistory.temp,
+            borderColor: '#ff5c5c',
+            backgroundColor: 'rgba(255, 92, 92, 0.08)',
+            borderWidth: 3,
+            pointBackgroundColor: '#ff5c5c',
+            pointRadius: 2,
+            pointHoverRadius: 6,
+            tension: 0.4,
+            fill: true,
+            yAxisID: 'yTemp'
+          },
+          {
+            label: 'Humidity (%)',
+            data: chartHistory.humi,
+            borderColor: '#06b6d4',
+            backgroundColor: 'rgba(6, 182, 212, 0.08)',
+            borderWidth: 3,
+            pointBackgroundColor: '#06b6d4',
+            pointRadius: 2,
+            pointHoverRadius: 6,
+            tension: 0.4,
+            fill: true,
+            yAxisID: 'yHumi'
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            labels: {
+              color: '#94a3b8',
+              font: { family: 'JetBrains Mono', size: 11 }
+            }
+          },
+          tooltip: {
+            backgroundColor: 'rgba(10, 15, 30, 0.95)',
+            titleColor: '#f8fafc',
+            bodyColor: '#94a3b8',
+            borderColor: 'rgba(56, 189, 248, 0.2)',
+            borderWidth: 1,
+            titleFont: { family: 'Outfit' },
+            bodyFont: { family: 'Inter' }
+          }
+        },
+        scales: {
+          x: {
+            grid: { color: 'rgba(255, 255, 255, 0.02)' },
+            ticks: { color: '#475569', font: { family: 'JetBrains Mono', size: 9 } }
+          },
+          yTemp: {
+            type: 'linear',
+            position: 'left',
+            min: 0,
+            max: 50,
+            grid: { color: 'rgba(255, 255, 255, 0.04)' },
+            ticks: { color: '#ff5c5c', font: { family: 'JetBrains Mono', size: 10 } },
+            title: {
+              display: true,
+              text: 'Temperature (°C)',
+              color: '#ff5c5c',
+              font: { family: 'Outfit', size: 11, weight: 'bold' }
+            }
+          },
+          yHumi: {
+            type: 'linear',
+            position: 'right',
+            min: 0,
+            max: 100,
+            grid: { drawOnChartArea: false },
+            ticks: { color: '#06b6d4', font: { family: 'JetBrains Mono', size: 10 } },
+            title: {
+              display: true,
+              text: 'Humidity (%)',
+              color: '#06b6d4',
+              font: { family: 'Outfit', size: 11, weight: 'bold' }
+            }
+          }
+        }
+      }
+    });
+
+    // Clock
+    function updateClock() {
+      const now = new Date();
+      const optionsTime = { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true };
+      const optionsDate = { day: '2-digit', month: 'short', year: 'numeric' };
+      document.getElementById('clock-time').innerText = now.toLocaleTimeString('en-US', optionsTime);
+      document.getElementById('clock-date').innerText = now.toLocaleDateString('en-US', optionsDate);
+    }
+    setInterval(updateClock, 1000);
+    updateClock();
+
+    let lastChartRecordTime = 0;
+    function recordChartData(temp, humi) {
+      const now = new Date();
+      const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+      if (Date.now() - lastChartRecordTime >= 300000 || chartHistory.temp.length === 0) {
+        lastChartRecordTime = Date.now();
+        chartHistory.labels.push(timeStr);
+        chartHistory.temp.push(temp);
+        chartHistory.humi.push(humi);
+        if (chartHistory.temp.length > 30) {
+          chartHistory.labels.shift();
+          chartHistory.temp.shift();
+          chartHistory.humi.shift();
+        }
+        localStorage.setItem('weather_chart_history_v2', JSON.stringify(chartHistory));
+        weatherChart.data.labels = chartHistory.labels;
+        weatherChart.data.datasets[0].data = chartHistory.temp;
+        weatherChart.data.datasets[1].data = chartHistory.humi;
+        weatherChart.update();
+      }
+    }
+
+    function updateTrends(temp, humi, pres) {
+      history.temp.push(temp);
+      history.humi.push(humi);
+      history.pres.push(pres);
+      if (history.temp.length > 10) history.temp.shift();
+      if (history.humi.length > 10) history.humi.shift();
+      if (history.pres.length > 10) history.pres.shift();
+      setTrendUI('temp', getTrend(history.temp));
+      setTrendUI('humi', getTrend(history.humi));
+      setTrendUI('pres', getTrend(history.pres));
+    }
+    
+    function getTrend(arr) {
+      if (arr.length < 3) return 'STABLE';
+      let sumDiff = 0;
+      for (let i = 1; i < arr.length; i++) {
+        sumDiff += (arr[i] - arr[i-1]);
+      }
+      let threshold = 0.05;
+      if (arr === history.pres) threshold = 0.15;
+      if (sumDiff > threshold) return 'RISING';
+      if (sumDiff < -threshold) return 'FALLING';
+      return 'STABLE';
+    }
+    
+    function setTrendUI(metric, trend) {
+      const el = document.getElementById(metric + '-trend');
+      if (!el) return;
+      if (trend === 'RISING') {
+        el.className = 'trend-indicator trend-up';
+        el.innerHTML = '▲ RISING';
+      } else if (trend === 'FALLING') {
+        el.className = 'trend-indicator trend-down';
+        el.innerHTML = '▼ FALLING';
+      } else {
+        el.className = 'trend-indicator trend-stable';
+        el.innerHTML = '■ STABLE';
+      }
+    }
+    
+    function updateData() {
+      fetch('/data')
+        .then(r => {
+          if(!r.ok) throw new Error();
+          return r.json();
+        })
+        .then(d => {
+          document.getElementById('offline-overlay').style.display = 'none';
+          lastDataTime = Date.now();
+          
+          const statusBadge = document.getElementById('status-badge');
+          if (d.online) {
+            statusBadge.className = 'status-badge online';
+            statusBadge.innerHTML = '<span class="pulse-dot"></span>STATION ONLINE';
+          } else {
+            statusBadge.className = 'status-badge offline';
+            statusBadge.innerHTML = '<span class="pulse-dot"></span>STATION OFFLINE';
+          }
+          
+          document.getElementById('temp-val').innerText = d.temperature.toFixed(1);
+          document.getElementById('hum-val').innerText = d.humidity.toFixed(1);
+          document.getElementById('pres-val').innerText = d.pressure.toFixed(0);
+          
+          let dewPoint = d.temperature - ((100 - d.humidity) / 5);
+          document.getElementById('temp-sub-val').innerText = dewPoint.toFixed(1);
+          
+          let absHumi = (d.humidity * 6.112 * Math.exp((17.67 * d.temperature)/(d.temperature + 243.5)) * 2.1674) / (273.15 + d.temperature);
+          document.getElementById('hum-sub-val').innerText = absHumi.toFixed(1);
+          
+          let relativePres = d.pressure * Math.pow(1 - (0.0065 * 228) / (d.temperature + 0.0065 * 228 + 273.15), -5.257);
+          document.getElementById('pres-sub-val').innerText = relativePres.toFixed(0);
+          
+          document.getElementById('temp-min-val').innerText = d.temp_min ? d.temp_min.toFixed(1) : '--';
+          document.getElementById('temp-min-time').innerText = d.temp_min_time ? '(' + d.temp_min_time + ')' : '';
+          document.getElementById('temp-max-val').innerText = d.temp_max ? d.temp_max.toFixed(1) : '--';
+          document.getElementById('temp-max-time').innerText = d.temp_max_time ? '(' + d.temp_max_time + ')' : '';
+          
+          document.getElementById('humi-min-val').innerText = d.humi_min ? d.humi_min.toFixed(1) : '--';
+          document.getElementById('humi-max-val').innerText = d.humi_max ? d.humi_max.toFixed(1) : '--';
+          
+          let tempPct = Math.max(0, Math.min(100, (d.temperature / 50) * 100));
+          document.getElementById('temp-bar').style.width = tempPct + '%';
+          
+          let humPct = Math.max(0, Math.min(100, d.humidity));
+          document.getElementById('hum-bar').style.width = humPct + '%';
+          
+          let presPct = Math.max(0, Math.min(100, ((d.pressure - 950) / 100) * 100));
+          document.getElementById('pres-bar').style.width = presPct + '%';
+          
+          updateTrends(d.temperature, d.humidity, d.pressure);
+          
+          if (d.online) {
+            recordChartData(d.temperature, d.humidity);
+          }
+        })
+        .catch(() => {
+          if (Date.now() - lastDataTime > 15000) {
+            document.getElementById('offline-overlay').style.display = 'flex';
+            const statusBadge = document.getElementById('status-badge');
+            statusBadge.className = 'status-badge offline';
+            statusBadge.innerHTML = '<span class="pulse-dot"></span>STATION OFFLINE';
+          }
+        });
+    }
+    
+    updateData();
+    setInterval(updateData, 2000);
+  </script>
+</body>
+</html>
+)rawliteral";
+
+  server.send(200, "text/html", html);
+}
+
+// ===================== JSON DATA =====================
+void handleData() {
+  String json = "{";
+  json += "\"temperature\":" + String(temperature) + ",";
+  json += "\"humidity\":" + String(humidity) + ",";
+  json += "\"pressure\":" + String(pressure) + ",";
+  json += "\"online\":" + String(dataReceived ? "true" : "false") + ",";
+  json += "\"timestamp\":" + String(millis()) + ",";
+  
+  time_t now;
+  time(&now);
+  json += "\"epoch_time\":" + String(now) + ",";
+  json += "\"temp_min\":" + String(temp_min) + ",";
+  json += "\"temp_min_time\":\"" + temp_min_time + "\",";
+  json += "\"temp_max\":" + String(temp_max) + ",";
+  json += "\"temp_max_time\":\"" + temp_max_time + "\",";
+  json += "\"humi_min\":" + String(humi_min) + ",";
+  json += "\"humi_max\":" + String(humi_max);
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
+// ===================== STATUS =====================
+void handleStatus() {
+  String status = dataReceived ? "online" : "offline";
+  server.send(200, "text/plain", status);
+}
+
+// ===================== SETUP =====================
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+  
+  Serial.println("\n========================================");
+  Serial.println("📡 ESP32 UART + OLED + Web Server");
+  Serial.println("========================================");
+  
+  // ===== Initialize UART for ESP8266 =====
+  Serial2.begin(115200, SERIAL_8N1, 16, 17);
+  Serial.println("✅ UART initialized (RX=16, TX=17)");
+  
+  // ===== Initialize OLED =====
+  Wire.begin(OLED_SDA, OLED_SCL);
+  
+  if(display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("✅ OLED found at 0x3C");
+  } else if(display.begin(SSD1306_SWITCHCAPVCC, 0x3D)) {
+    Serial.println("✅ OLED found at 0x3D");
+  } else {
+    Serial.println("❌ OLED not found!");
+  }
+  
+  display.clearDisplay();
+  display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
+  display.drawLine(1, 11, 126, 11, SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(4, 3);
+  display.print("SYSTEM INIT");
+  
+  // WAIT status box
+  display.fillRect(98, 2, 24, 8, SSD1306_WHITE);
+  display.setTextColor(SSD1306_BLACK);
+  display.setCursor(102, 2);
+  display.print("WAIT");
+  display.setTextColor(SSD1306_WHITE);
+  
+  display.setCursor(12, 20);
+  display.print("CONNECTING WIFI");
+  display.setCursor(12, 34);
+  display.print("SSID: ");
+  display.print(ssid);
+  
+  display.drawRect(12, 48, 104, 6, SSD1306_WHITE);
+  display.display();
+  
+  // ===== Connect to WiFi Router =====
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  Serial.print("📡 Connecting to WiFi: ");
+  Serial.println(ssid);
+  
+  // Clean HMI loading effect + WiFi wait loop
+  int progressWidth = 0;
+  for (int attempts = 1; attempts <= 30; attempts++) {
+    delay(200);
+    progressWidth = (attempts * 100) / 30;
+    display.fillRect(14, 50, progressWidth, 2, SSD1306_WHITE);
+    display.display();
+    if (WiFi.status() == WL_CONNECTED) {
+      break;
+    }
+  }
+  
+  // ===== Setup Web Server =====
+  server.on("/", handleRoot);
+  server.on("/data", handleData);
+  server.on("/status", handleStatus);
+  server.begin();
+  Serial.println("✅ HTTP server started");
+  
+  // ===== Show Ready Message =====
+  Serial.println("\n✅ ESP32 Ready!");
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("🌐 Open browser: http://" + WiFi.localIP().toString());
+  } else {
+    Serial.println("🌐 WiFi Connection Offline");
+  }
+  Serial.println("========================================\n");
+  
+  // Show on OLED
+  display.clearDisplay();
+  display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
+  display.drawLine(1, 11, 126, 11, SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(4, 3);
+  display.print(WiFi.status() == WL_CONNECTED ? "SYSTEM STA ACTIVE" : "SYSTEM STA OFFLINE");
+  
+  // Status OK/ERR box
+  display.fillRect(98, 2, 24, 8, SSD1306_WHITE);
+  display.setTextColor(SSD1306_BLACK);
+  display.setCursor(104, 2);
+  display.print(WiFi.status() == WL_CONNECTED ? "OK" : "ERR");
+  display.setTextColor(SSD1306_WHITE);
+  
+  display.setCursor(8, 20);
+  display.print("SSID: ");
+  display.print(ssid);
+  display.setCursor(8, 32);
+  display.print("IP:   ");
+  display.print(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "OFFLINE");
+  
+  display.setCursor(8, 48);
+  display.print("AWAITING DATA...");
+  display.display();
+  
+  Serial.println("📡 Waiting for sensor data from ESP8266...");
+}
+
+// ===================== LOOP =====================
+void loop() {
+  server.handleClient();
+  
+  // Read UART data from ESP8266
+  while (Serial2.available()) {
+    char c = Serial2.read();
+    
+    if (c != '\n' && c != '\r') {
+      receivedData += c;
+    }
+    
+    if (c == '\n' || c == '\r' || c == '#') {
+      if (receivedData.length() > 0) {
+        Serial.println("📥 Data received: " + receivedData);
+        parseData(receivedData);
+        receivedData = "";
+      }
+    }
+  }
+  
+  if (dataReceived && (millis() - lastLogTime >= 60000)) {
+    lastLogTime = millis();
+    uploadHistoryToFirebase();
+  }
+  
+  // Check telemetry timeout
+  if (dataReceived && (millis() - lastDataTime > 30000)) {
+    dataReceived = false;
+    Serial.println("⚠️ Data timeout!");
+    updateOLED(); // Show offline alert immediately
+  }
+  
+  // Periodic OLED redraw for animations (blinking badges)
+  static unsigned long lastOledRefresh = 0;
+  if (millis() - lastOledRefresh >= 500) {
+    lastOledRefresh = millis();
+    updateOLED();
+  }
+  
+  // Debug status
+  if (!dataReceived && (millis() - lastDebugPrint > 10000)) {
+    lastDebugPrint = millis();
+    Serial.println("⏳ Waiting for data from ESP8266...");
+  }
+  
+  delay(10);
+}
