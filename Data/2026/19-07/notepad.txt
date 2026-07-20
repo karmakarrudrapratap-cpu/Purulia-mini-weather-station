@@ -1,0 +1,3 @@
+[00:00] Temp: 32.3°C, Humidity: 79.0%, Pressure: 978 hPa [LOW HUMIDITY 🏜️, HIGH HUMIDITY 💧]
+[00:01] Temp: 32.3°C, Humidity: 79.0%, Pressure: 978 hPa [HIGH TEMP 🔥, LOW HUMIDITY 🏜️, HIGH HUMIDITY 💧]
+[00:02] Temp: 32.2°C, Humidity: 79.0%, Pressure: 978 hPa [LOW TEMP ❄️, LOW HUMIDITY 🏜️, HIGH HUMIDITY 💧]
